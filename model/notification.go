@@ -1,7 +1,6 @@
 package model
 
 import (
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/naiba/nezha/pkg/utils"
+	"github.com/nezhahq/nezha/pkg/utils"
 )
 
 const (
@@ -33,14 +32,13 @@ type NotificationServerBundle struct {
 
 type Notification struct {
 	Common
-	Name          string
-	Tag           string // 分组名
-	URL           string
-	RequestMethod int
-	RequestType   int
-	RequestHeader string `gorm:"type:longtext" `
-	RequestBody   string `gorm:"type:longtext" `
-	VerifySSL     *bool
+	Name          string `json:"name"`
+	URL           string `json:"url"`
+	RequestMethod uint8  `json:"request_method"`
+	RequestType   uint8  `json:"request_type"`
+	RequestHeader string `json:"request_header" gorm:"type:longtext"`
+	RequestBody   string `json:"request_body" gorm:"type:longtext"`
+	VerifyTLS     *bool  `json:"verify_tls,omitempty"`
 }
 
 func (ns *NotificationServerBundle) reqURL(message string) string {
@@ -72,8 +70,8 @@ func (ns *NotificationServerBundle) reqBody(message string) (string, error) {
 			return string(msgBytes)[1 : len(msgBytes)-1]
 		}), nil
 	case NotificationRequestTypeForm:
-		var data map[string]string
-		if err := utils.Json.Unmarshal([]byte(n.RequestBody), &data); err != nil {
+		data, err := utils.GjsonIter(n.RequestBody)
+		if err != nil {
 			return "", err
 		}
 		params := url.Values{}
@@ -100,8 +98,8 @@ func (n *Notification) setRequestHeader(req *http.Request) error {
 	if n.RequestHeader == "" {
 		return nil
 	}
-	var m map[string]string
-	if err := utils.Json.Unmarshal([]byte(n.RequestHeader), &m); err != nil {
+	m, err := utils.GjsonIter(n.RequestHeader)
+	if err != nil {
 		return err
 	}
 	for k, v := range m {
@@ -111,17 +109,14 @@ func (n *Notification) setRequestHeader(req *http.Request) error {
 }
 
 func (ns *NotificationServerBundle) Send(message string) error {
-	var verifySSL bool
+	var client *http.Client
 	n := ns.Notification
-	if n.VerifySSL != nil && *n.VerifySSL {
-		verifySSL = true
+	if n.VerifyTLS != nil && *n.VerifyTLS {
+		client = utils.HttpClient
+	} else {
+		client = utils.HttpClientSkipTlsVerify
 	}
 
-	transCfg := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: verifySSL},
-	}
-
-	client := &http.Client{Transport: transCfg, Timeout: time.Minute * 10}
 	reqBody, err := ns.reqBody(message)
 	if err != nil {
 		return err
@@ -147,13 +142,15 @@ func (ns *NotificationServerBundle) Send(message string) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		defer func() {
-			_ = resp.Body.Close()
-		}()
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("%d@%s %s", resp.StatusCode, resp.Status, string(body))
+	} else {
+		_, _ = io.Copy(io.Discard, resp.Body)
 	}
 
 	return nil
@@ -172,14 +169,23 @@ func (ns *NotificationServerBundle) replaceParamsInString(str string, message st
 
 	if ns.Server != nil {
 		str = strings.ReplaceAll(str, "#SERVER.NAME#", mod(ns.Server.Name))
+		str = strings.ReplaceAll(str, "#SERVER.ID#", mod(fmt.Sprintf("%d", ns.Server.ID)))
 		str = strings.ReplaceAll(str, "#SERVER.CPU#", mod(fmt.Sprintf("%f", ns.Server.State.CPU)))
 		str = strings.ReplaceAll(str, "#SERVER.MEM#", mod(fmt.Sprintf("%d", ns.Server.State.MemUsed)))
 		str = strings.ReplaceAll(str, "#SERVER.SWAP#", mod(fmt.Sprintf("%d", ns.Server.State.SwapUsed)))
 		str = strings.ReplaceAll(str, "#SERVER.DISK#", mod(fmt.Sprintf("%d", ns.Server.State.DiskUsed)))
+		str = strings.ReplaceAll(str, "#SERVER.MEMUSED#", mod(fmt.Sprintf("%d", ns.Server.State.MemUsed)))
+		str = strings.ReplaceAll(str, "#SERVER.SWAPUSED#", mod(fmt.Sprintf("%d", ns.Server.State.SwapUsed)))
+		str = strings.ReplaceAll(str, "#SERVER.DISKUSED#", mod(fmt.Sprintf("%d", ns.Server.State.DiskUsed)))
+		str = strings.ReplaceAll(str, "#SERVER.MEMTOTAL#", mod(fmt.Sprintf("%d", ns.Server.Host.MemTotal)))
+		str = strings.ReplaceAll(str, "#SERVER.SWAPTOTAL#", mod(fmt.Sprintf("%d", ns.Server.Host.SwapTotal)))
+		str = strings.ReplaceAll(str, "#SERVER.DISKTOTAL#", mod(fmt.Sprintf("%d", ns.Server.Host.DiskTotal)))
 		str = strings.ReplaceAll(str, "#SERVER.NETINSPEED#", mod(fmt.Sprintf("%d", ns.Server.State.NetInSpeed)))
 		str = strings.ReplaceAll(str, "#SERVER.NETOUTSPEED#", mod(fmt.Sprintf("%d", ns.Server.State.NetOutSpeed)))
 		str = strings.ReplaceAll(str, "#SERVER.TRANSFERIN#", mod(fmt.Sprintf("%d", ns.Server.State.NetInTransfer)))
 		str = strings.ReplaceAll(str, "#SERVER.TRANSFEROUT#", mod(fmt.Sprintf("%d", ns.Server.State.NetOutTransfer)))
+		str = strings.ReplaceAll(str, "#SERVER.NETINTRANSFER#", mod(fmt.Sprintf("%d", ns.Server.State.NetInTransfer)))
+		str = strings.ReplaceAll(str, "#SERVER.NETOUTTRANSFER#", mod(fmt.Sprintf("%d", ns.Server.State.NetOutTransfer)))
 		str = strings.ReplaceAll(str, "#SERVER.LOAD1#", mod(fmt.Sprintf("%f", ns.Server.State.Load1)))
 		str = strings.ReplaceAll(str, "#SERVER.LOAD5#", mod(fmt.Sprintf("%f", ns.Server.State.Load5)))
 		str = strings.ReplaceAll(str, "#SERVER.LOAD15#", mod(fmt.Sprintf("%f", ns.Server.State.Load15)))
@@ -187,7 +193,7 @@ func (ns *NotificationServerBundle) replaceParamsInString(str string, message st
 		str = strings.ReplaceAll(str, "#SERVER.UDPCONNCOUNT#", mod(fmt.Sprintf("%d", ns.Server.State.UdpConnCount)))
 
 		var ipv4, ipv6, validIP string
-		ipList := strings.Split(ns.Server.Host.IP, "/")
+		ipList := strings.Split(ns.Server.GeoIP.IP.Join(), "/")
 		if len(ipList) > 1 {
 			// 双栈
 			ipv4 = ipList[0]
@@ -195,7 +201,7 @@ func (ns *NotificationServerBundle) replaceParamsInString(str string, message st
 			validIP = ipv4
 		} else if len(ipList) == 1 {
 			// 仅ipv4|ipv6
-			if strings.Contains(ipList[0], ":") {
+			if strings.IndexByte(ipList[0], ':') != -1 {
 				ipv6 = ipList[0]
 				validIP = ipv6
 			} else {
